@@ -1,0 +1,425 @@
+---
+title: "STAT 206B - Take Home Final"
+author: "Kelsey Blackstone"
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    latex_engine: xelatex
+editor_options:
+  chunk_output_type: console
+---
+
+
+
+## Problem 1
+
+Consider $y_{1}, ..., y_{n} \overset{\text{iid}} \sim{}Gamma(\nu, \theta)$, where E($y_{i}$) = $\nu/\theta$. 
+Assign $\nu$ $\overset{\text{iid}} \sim{}$ Gamma(3, 1) and $\theta\overset{\text{iid}} \sim{}$Gamma(2, 2). 
+
+
+### Part (i)
+Develop a Metropolis-within-Gibbs algorithm to sample from $\rho(\nu, \theta | y_{1},...,y_{n})$. 
+For implementing Metropolis for $\rho(\nu, \theta | y_{1},...,y_{n})$, use a random walk proposal on $log(\nu)$.
+
+```{r, echo = FALSE, message=FALSE, results='hide'}
+rm(list=ls())
+library(MASS)
+library(coda)
+library(pscl)
+```
+```{r}
+# simulate data 
+set.seed(666)
+nu = 2 
+theta = 3
+n = 1000
+y = rgamma(n, shape = nu, rate = theta)
+
+## Metropolis-within-Gibbs 
+
+# Change of variables on nu since we want log nu. I computed the change of 
+# variables distributionby hand setting eta = log(nu) 
+
+# log likelihood function of log(nu),theta
+log_lik <- function(theta.tilde){
+    eta <- theta.tilde[1]
+    log_lik <- (exp(eta)*n)*log(theta[2]) - n*(lgamma(exp(eta))) + 
+      3*eta - exp(eta) + (exp(eta))*sum(log(y))
+    return(log_lik)
+}
+
+# Initialize MCMC
+n = 1000
+niter <- 10000
+theta.store <- matrix(NA, nrow = niter,ncol = 2)
+theta <- c(1,1) ## initial value
+var.tuning <- .006
+accept <- 0
+
+# Metropolis-within-Gibbs Loop
+for(i in 1:niter){
+   prop <- rnorm(1, theta[1], sqrt(var.tuning))  ## MH Step
+   acceptance.prob <- min(exp(log_lik(prop)-log_lik(theta)),1)
+   u <- runif(1)
+   if(u<acceptance.prob){
+       theta[1] <- prop
+       accept <- accept+1
+   }else{
+      theta[1] <- theta[1]
+      accept <- accept
+   }
+   theta[2] <- rgamma(1, shape = exp(theta[1])*n + 2, rate = sum(y) + 2) 
+   theta.store[i,] <- theta
+}
+
+
+plot(theta.store[, 1], type = "l", ylab = "nu", main = "MCMC for nu")
+abline(log(nu), 0, lwd = 2, col = "red")
+plot(theta.store[, 2], type = "l", ylab = "theta", main = "MCMC for theta")
+abline(3, 0, lwd = 2, col = "red")
+
+## What is our acceptance? Should be between 0.3 to 0.5
+prob_accept = accept/niter 
+print(prob_accept)
+
+# begin computations at burn in value
+burn.in <- 1000
+
+# Computing Effective Sample Size (ESS) of nu 
+ESS_nu <- effectiveSize(theta.store[(burn.in + 1):niter, 1])
+print(ESS_nu)
+
+# # Computing Effective Sample Size (ESS) of theta. Necessary?
+# effectiveSize(theta.store[(burn.in+1):niter,2])
+
+# Autocorrelation Plots
+acf(theta.store[(burn.in + 1):niter, 1], lag = 50, 
+    main = "Autocorrelation Plot for nu")
+acf(theta.store[(burn.in + 1):niter, 2],lag = 50, 
+    main = "Autocorrelation Plot for theta")
+
+burn.in <- 1000
+
+## posterior means of nu and theta
+post.mean <- colMeans(theta.store[seq(from = (burn.in + 1), to = niter, by = 20),]) 
+
+## posterior mean of nu: have to exponentiate 
+post.mean.nu <- exp(post.mean[1])
+print(post.mean.nu)
+
+## posterior mean of theta:
+post.mean.theta <- post.mean[2]
+print(post.mean.theta)
+
+## marginal posterior distributions of nu + CI for nu
+hist(exp(theta.store[seq(from=(burn.in + 1), to = niter, by = 20), 1]), 
+     main = "95% CI for nu", xlab = "nu")
+abline(v = quantile(exp(theta.store[seq(from = (burn.in + 1), to = niter, by = 20), 1]), 0.025), 
+       lty = 2, lwd = 2, col = "green")
+abline(v = quantile(exp(theta.store[seq(from = (burn.in + 1), to = niter, by = 20), 1]), 0.975), 
+       lty = 2, lwd = 2, col = "blue")
+abline(v = 1, lwd = 2, col = "red")
+
+## marginal posterior distributions of theta + CI for theta
+hist(theta.store[seq(from = (burn.in + 1), to = niter, by = 20), 2], 
+     main = "95% CI for theta", xlab = "theta")
+abline(v = quantile(theta.store[seq(from = (burn.in + 1), to = niter, by = 20), 2], 0.025), 
+       lty = 2, lwd = 2, col = "green")
+abline(v = quantile(theta.store[seq(from = (burn.in + 1), to = niter, by = 20), 2], 0.975), 
+       lty = 2,lwd = 2, col = "blue")
+abline(v = 0.5, lwd = 2, col = "red")
+```
+
+
+### Part 2:
+
+Develop a Metropolis-Hastings algorithm that jointly proposes $log(\nu)$ and $log(\theta)$ using a Gaussian random walk centered on the current value of the parameters. Tune the variance-covariance matrix of the proposal using a test run that proposes the parameters independently (but evaluates acceptance jointly).
+
+
+```{r}
+rm(list=ls())
+library(MASS)
+library(coda)
+library(pscl)
+
+# simulate data 
+set.seed(666)
+nu = 2 
+theta_t = 3
+n = 1000
+y = rgamma(n, shape = nu, rate = theta_t)
+
+#log likelihood function of log(nu),theta
+log_lik <- function(theta.tilde){
+   eta <- theta.tilde[1]
+    m <- theta.tilde[2]
+    log_lik <- log(2) + (exp(eta)*n + 1)*m - n*(lgamma(exp(eta))) +
+      3*eta - exp(m)*sum(y) -2*exp(m) - exp(eta) + (exp(eta) - 1)*sum(log(y)) + m
+    return(log_lik)
+}
+
+# initializing  MCMC
+niter <- 100000
+theta.store <- matrix(data = NA, nrow = niter, ncol = 2)
+theta <- c(1,1)
+var.tuning <- matrix(c(0.001, 0, 0, 0.001),
+                     nrow = 2,
+                     ncol= 2,
+                     byrow = TRUE)
+accept <- 0
+
+for(i in 1:niter){
+   prop <- mvrnorm(1, mu = log(theta), Sigma = var.tuning)
+   acceptance.prob <- min(exp(log_lik(prop) - log_lik(log(theta))), 1)
+   u <- runif(1)
+   if(u < acceptance.prob){
+       theta <- exp(prop)
+       accept <- accept+1
+   }else{
+      theta <- theta
+      accept <- accept
+    }
+   theta.store[i,] <- theta
+}
+
+
+plot(theta.store[, 1], type="l", ylab = "nu", main = "MCMC for nu")
+abline(nu, 0, lwd = 2, col = "red")
+plot(theta.store[, 2], type="l", ylab = "theta", main = "MCMC for theta")
+abline(theta_t, 0, lwd = 2, col = "red")
+
+# Acceptance Rate
+acceptance <- accept/niter 
+print(acceptance)
+
+# begin computations at burn in value
+burn.in <- 500
+burn.in.theta <- 300
+burn.in.nu <- 400
+
+
+# Computing Effective Sample Size (ESS) of nu 
+ESS_nu <- effectiveSize(theta.store[(burn.in.nu + 1):niter, 1])
+print(ESS_nu)
+
+# # Computing Effective Sample Size (ESS) of theta. Necessary?
+ESS_theta <- effectiveSize(theta.store[(burn.in.theta + 1):niter, 2])
+print(ESS_theta)
+
+
+# Autocorrelation Plots
+acf(theta.store[(burn.in.nu + 1):niter, 1], lag = 50, 
+    main = "Autocorrelation Plot for nu")
+acf(theta.store[(burn.in.theta + 1):niter, 2], lag = 50, 
+    main = "Autocorrelation Plot for theta")
+
+
+## posterior means of nu and theta
+post.mean <- colMeans(theta.store[seq(from=(burn.in + 1), to = niter, by = 20), ]) 
+print(post.mean)
+
+
+## marginal posterior distributions of nu and CI for nu
+hist(exp(theta.store[seq(from = (burn.in.nu + 1), to = niter, by = 20), 1]), 
+     main = "95% CI for nu", xlab = "nu")
+abline(v = quantile(exp(theta.store[seq(from = (burn.in.nu + 1), to = niter, by = 20), 1]), 0.025), 
+       lty = 2, lwd = 2, col = "green")
+abline(v = quantile(exp(theta.store[seq(from = (burn.in.nu + 1), to = niter, by = 20), 1]), 0.975), 
+       lty = 2, lwd = 2, col = "blue")
+abline(v = 1, lwd = 2, col = "red")
+
+## marginal posterior distributions of theta and CI for theta
+hist(theta.store[seq(from=(burn.in.theta + 1), to = niter, by = 20), 2], 
+     main = "95% CI for theta", xlab = "theta")
+abline(v = quantile(theta.store[seq(from = (burn.in.theta + 1), to = niter, by = 20), 2], 0.025), 
+       lty = 2, lwd = 2, col="green")
+abline(v = quantile(theta.store[seq(from = (burn.in.theta + 1), to = niter, by = 20), 2], 0.975), 
+       lty = 2, lwd = 2, col = "blue")
+abline(v = 0.5, lwd = 2, col = "red")
+```
+
+## Problem 2 
+
+### Model
+
+$y_{i} | \theta, m \overset{\text{iid}} \sim{} Poisson(\theta)$
+
+$y_{i} | \phi, m \overset{\text{iid}} \sim{} Poisson(\phi)$
+
+$\theta\overset{\text{iid}} \sim{} Gamma(\alpha, \beta)$
+
+$\phi\overset{\text{iid}} \sim{} Gamma(\gamma, \delta)$
+
+$m\overset{\text{iid}} \sim{} Uniform(1,n)$
+
+
+```{r}
+rm(list=ls())
+set.seed(666)
+
+# number of iterations
+niter = 3000
+
+# Data from Coal Mining Dataset 
+Y = as.vector(GeDS::coalMining[,2])
+
+# number of observations
+n = length(Y) 
+
+# no change point
+m <- n 
+
+# matrix for m
+mat = matrix(NA, nrow = niter, ncol = 3)
+
+# Begin Gibbs Sampling 
+  
+alpha <- 1 
+lambda <- 1
+beta <- 0.5
+delta <- 0.5
+
+for (j in 1:niter) {
+        
+    # gibbs sampling from theta and phi full-conditionals 
+    theta <- rgamma(1, alpha + sum(Y[1:m]), m + beta) # step 1
+    phi <- rgamma(1, lambda + (sum(Y) - sum(Y[1:m])), n - m + delta)
+    mat[j,1] <- theta
+    mat[j,2] <- phi
+  
+    # calculating m based on full conditional of m
+    prior_m <- exp((phi - theta) * (1:n)) * (theta / phi)^cumsum(Y) 
+    prior_m <- prior_m / sum(prior_m)
+    m <- min((1:n)[runif(1) < cumsum(prior_m)])
+  
+    mat[j,3] <- m 
+}
+
+head(mat)
+```
+
+## Problem 4 
+
+### Part (i)
+Simulate predictors from $Normal(0, 1)$ and simulate responses considering $\beta_{0} = 0.5$ and $\beta_{1} = 2$.
+
+```{r}
+rm(list=ls())
+set.seed(666)
+
+n = 1000 
+z = rnorm(n, mean = 0, sd = 1)
+b0 = 0.5
+b1 = 2
+
+prob_mat <- matrix(NA, nrow = length(z))
+sample_mat <- matrix(NA, nrow = length(z))
+
+for (i in (1:length(z))){
+      zscore <- b0 + b1*z[i]
+      samp <- pnorm(zscore)
+      prob_mat[i] <- samp
+      y_val <- rbinom(n = 1, prob = samp, size = 1)
+      sample_mat[i] <- y_val
+}
+
+# number of successes
+sum(sample_mat)
+
+```
+
+### Part (ii)
+Implement a Gibbs sampling algorithm to estimate the marginal posterior distributions of $\beta_{0}$ and $\beta_{1}$. 
+Report $95%$ credible intervals for $\beta_{0}$ and $\beta_{1}$. 
+
+```{r}
+set.seed(666)
+require(mvtnorm)
+require(truncnorm)
+
+# Generate random data from normal with 500 observations
+n <- 500
+data <- rnorm(n)
+
+# Create n x D design matrix, D is number of parameters
+num_param <- 2
+# We pad our observations with a column of 1's to facilitate matrix multiplication
+data_matrix <- matrix(c(rep(1, n), data), ncol = num_param)
+
+# True values of regression coeffiecients beta
+true_beta <- c(0.5, 2)
+
+# Obtain the vector with probabilities of success p using the probit link
+p <- pnorm(data_matrix %*% true_beta)
+
+# Generate binary observation data y
+y <- rbinom(n, 1, p)
+
+beta0 <- rep(0, num_param)
+q0 <- diag(10, num_param)
+
+# Initialize parameters
+beta <- rep(0, num_param)
+z <- rep(0, n)
+
+# tuning parameters
+niter <- 10000
+burn_in <- 5000
+# Empty matrix to store chain of betas
+beta.store <- matrix(0, nrow = niter, ncol = 2)
+
+# Compute posterior variance of theta
+prec_0 <- solve(q0)
+V <- solve(prec_0 + crossprod(data_matrix, data_matrix))
+
+for (i in 2:niter) {
+  
+      # Update Mean of z
+      mu_z <- data_matrix %*% beta
+      
+      # Draw latent variable z from its full conditional: z | \theta, y, data_matrix
+      z[y == 0] <- rtruncnorm(n - sum(y), mean = mu_z[y == 0], sd = 1, a = -Inf, b = 0)
+      z[y == 1] <- rtruncnorm(sum(y), mean = mu_z[y == 1], sd = 1, a = 0, b = Inf)
+      
+      # Compute posterior mean of theta
+      M <- V %*% (prec_0 %*% beta0 + crossprod(data_matrix, z))
+      # Draw variable \theta from its full conditional: \theta | z, data_matrix
+      beta <- c(rmvnorm(1, M, V))
+      
+      # Store the \theta draws
+      beta.store[i, ] <- beta
+}
+
+burn.in <- 1000
+
+## posterior means of B0 and B1
+post.mean.beta <- colMeans(beta.store[seq(from = (burn.in + 1), to = niter, by = 20),]) 
+
+## posterior mean of nu: have to exponentiate 
+post.mean.beta0 <- post.mean.beta[1]
+print(post.mean.beta0)
+
+## posterior mean of theta:
+post.mean.beta1 <- post.mean.beta[2]
+print(post.mean.beta1)
+
+## marginal posterior distributions of B0 + CI for nu
+hist(exp(beta.store[seq(from=(burn.in + 1), to = niter, by = 20), 1]), 
+     main = "95% CI for B0", xlab = "B0")
+abline(v = quantile(exp(beta.store[seq(from = (burn.in + 1), to = niter, by = 20), 1]), 0.025), 
+       lty = 2, lwd = 2, col = "green")
+abline(v = quantile(exp(beta.store[seq(from = (burn.in + 1), to = niter, by = 20), 1]), 0.975), 
+       lty = 2, lwd = 2, col = "blue")
+abline(v = 1, lwd = 2, col = "red")
+
+## marginal posterior distributions of B1 + CI for theta
+hist(beta.store[seq(from = (burn.in + 1), to = niter, by = 20), 2], 
+     main = "95% CI for B1", xlab = "B1")
+abline(v = quantile(beta.store[seq(from = (burn.in + 1), to = niter, by = 20), 2], 0.025), 
+       lty = 2, lwd = 2, col = "green")
+abline(v = quantile(beta.store[seq(from = (burn.in + 1), to = niter, by = 20), 2], 0.975), 
+       lty = 2,lwd = 2, col = "blue")
+abline(v = 0.5, lwd = 2, col = "red")
+```
+
